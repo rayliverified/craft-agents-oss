@@ -1,8 +1,12 @@
 import { existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import type { BackendHostRuntimeContext } from '../types.ts';
 import { setPathToClaudeCodeExecutable } from '../../options.ts';
+import { execInWorker } from './spawn-worker.ts';
+
+// Cache for resolved paths to avoid repeated spawns
+const resolvedBunCache = new Map<string, string | undefined>();
+const resolvedRgCache = new Map<string, string | undefined>();
 
 /**
  * When set, the resolver walks further up from the .app bundle to find SDK,
@@ -72,10 +76,25 @@ function resolveBundledRuntimePath(hostRuntime: BackendHostRuntimeContext): stri
   // Packaged apps must ship their own bundled bun — never resolve from PATH
   // to avoid picking up an incompatible system install.
   if (!hostRuntime.isPackaged) {
+    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+    const cacheKey = `${whichCmd}-bun`;
+    if (resolvedBunCache.has(cacheKey)) {
+      return resolvedBunCache.get(cacheKey);
+    }
     try {
-      const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-      const systemBun = execFileSync(whichCmd, ['bun'], { encoding: 'utf-8' }).trim();
-      if (systemBun && existsSync(systemBun)) return systemBun;
+      execInWorker(whichCmd, ['bun']).then(result => {
+        const systemBun = result.trim();
+        if (systemBun && existsSync(systemBun)) {
+          resolvedBunCache.set(cacheKey, systemBun);
+        } else {
+          resolvedBunCache.set(cacheKey, undefined);
+        }
+      }).catch(() => {
+        resolvedBunCache.set(cacheKey, undefined);
+      });
+      // Return undefined immediately, async result will be cached for next call
+      // This is acceptable because the backend can fall back to bundled runtime
+      return undefined;
     } catch { /* system bun not found */ }
   }
   return undefined;
@@ -206,10 +225,25 @@ function resolveRipgrepPath(hostRuntime: BackendHostRuntimeContext): string | un
   // Packaged apps must use vendored binary only — never resolve from PATH
   // to avoid picking up an incompatible system install.
   if (!hostRuntime.isPackaged) {
+    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+    const cacheKey = `${whichCmd}-rg`;
+    if (resolvedRgCache.has(cacheKey)) {
+      return resolvedRgCache.get(cacheKey);
+    }
     try {
-      const whichCmd = process.platform === 'win32' ? 'where' : 'which';
-      const systemRg = execFileSync(whichCmd, ['rg'], { encoding: 'utf-8' }).trim();
-      if (systemRg && existsSync(systemRg)) return systemRg;
+      execInWorker(whichCmd, ['rg']).then(result => {
+        const systemRg = result.trim();
+        if (systemRg && existsSync(systemRg)) {
+          resolvedRgCache.set(cacheKey, systemRg);
+        } else {
+          resolvedRgCache.set(cacheKey, undefined);
+        }
+      }).catch(() => {
+        resolvedRgCache.set(cacheKey, undefined);
+      });
+      // Return undefined immediately, async result will be cached for next call
+      // This is acceptable because the search can fall back to vendored binary
+      return undefined;
     } catch { /* system rg not found */ }
   }
 
